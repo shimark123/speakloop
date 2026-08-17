@@ -7,6 +7,7 @@ import hypothetical from "./off-the-cuff/hypothetical/topics.js";
 import evaluative from "./off-the-cuff/evaluative/topics.js";
 import humorous from "./off-the-cuff/humorous/topics.js";
 import toastmasters from "./off-the-cuff/toastmasters/topics.js";
+import kids from "./off-the-cuff/kids/kids.js";
 
 import science from "./deep-research/science/topics.js";
 import history from "./deep-research/history/topics.js";
@@ -21,6 +22,7 @@ const CUFF_SOURCES = [
   { cat: "Evaluative", items: evaluative },
   { cat: "Humorous", items: humorous },
   { cat: "Toastmasters", items: toastmasters },
+  { cat: "Kids", items: kids },
 ];
 
 const RESEARCH_SOURCES = [

@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { Shuffle, Mic, RotateCcw, BookOpen, Zap, Check, X, AtSign } from "lucide-react";
 import { TOPICS, CUFF_CATS, RESEARCH_CATS } from "./data/topics/index.js";
+import { getAllRecordings, putRecording, deleteRecordingFromDb } from "./lib/recordingsDb.js";
 
 // ---------------------------------------------------------------------------
 // Design tokens
@@ -125,6 +126,11 @@ function formatTime(s) {
   const m = Math.floor(s / 60);
   const sec = s % 60;
   return `${m}:${sec.toString().padStart(2, "0")}`;
+}
+
+function formatDate(ts) {
+  if (!ts) return "";
+  return new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 
 function recordingFilename(topic) {
@@ -337,16 +343,18 @@ export default function Speakloop() {
         const blob = new Blob(chunksRef.current, { type: "audio/webm" });
         const url = URL.createObjectURL(blob);
         setAudioUrl(url);
-        setRecordings((prev) => [
-          {
-            id: `${prev.length}-${topic.id}-${Math.random().toString(36).slice(2, 8)}`,
-            topicText: topic.text,
-            cat: topic.cat,
-            seconds: elapsed,
-            url,
-          },
-          ...prev,
-        ]);
+        const record = {
+          id: `${Date.now()}-${topic.id}-${Math.random().toString(36).slice(2, 8)}`,
+          topicText: topic.text,
+          cat: topic.cat,
+          seconds: elapsed,
+          createdAt: Date.now(),
+          label: null,
+          note: null,
+          blob,
+        };
+        setRecordings((prev) => [{ ...record, url }, ...prev]);
+        putRecording(record).catch((e) => console.error("Failed to save recording", e));
         if (mediaRef.current) {
           mediaRef.current.getTracks().forEach((tr) => tr.stop());
           mediaRef.current = null;
@@ -382,20 +390,39 @@ export default function Speakloop() {
       if (rec) URL.revokeObjectURL(rec.url);
       return prev.filter((r) => r.id !== id);
     });
+    deleteRecordingFromDb(id).catch((e) => console.error("Failed to delete recording", e));
+  };
+
+  const updateRecordingMeta = (id, updates) => {
+    setRecordings((prev) => {
+      const next = prev.map((r) => (r.id === id ? { ...r, ...updates } : r));
+      const rec = next.find((r) => r.id === id);
+      if (rec) {
+        const { url: _url, ...persisted } = rec;
+        putRecording(persisted).catch((e) => console.error("Failed to update recording", e));
+      }
+      return next;
+    });
   };
 
   useEffect(() => () => clearTimer(), []);
 
-  // Recordings only live in this tab's memory — warn before a reload/close wipes them.
+  // Load previously saved recordings from IndexedDB on app load.
   useEffect(() => {
-    if (recordings.length === 0) return;
-    const handler = (e) => {
-      e.preventDefault();
-      e.returnValue = "";
+    let cancelled = false;
+    getAllRecordings()
+      .then((stored) => {
+        if (cancelled) return;
+        const withUrls = stored
+          .map((rec) => ({ ...rec, url: URL.createObjectURL(rec.blob) }))
+          .sort((a, b) => b.createdAt - a.createdAt);
+        setRecordings(withUrls);
+      })
+      .catch((e) => console.error("Failed to load recordings from IndexedDB", e));
+    return () => {
+      cancelled = true;
     };
-    window.addEventListener("beforeunload", handler);
-    return () => window.removeEventListener("beforeunload", handler);
-  }, [recordings.length]);
+  }, []);
 
   const accent = mode === "cuff" ? C.amber : C.sage;
   const accentSoft = mode === "cuff" ? C.amberSoft : C.sageSoft;
@@ -485,7 +512,12 @@ export default function Speakloop() {
         </div>
 
         {view === "library" ? (
-          <RecordingsLibrary recordings={recordings} onDelete={deleteRecording} accent={accent} />
+          <RecordingsLibrary
+            recordings={recordings}
+            onDelete={deleteRecording}
+            onUpdate={updateRecordingMeta}
+            accent={accent}
+          />
         ) : (
         <>
         {/* Mode toggle */}
@@ -658,7 +690,7 @@ export default function Speakloop() {
                 <PresetRow
                   label="Speak"
                   value={speakSeconds}
-                  options={[60, 90, 120, 180]}
+                  options={[30, 60, 90, 120, 180]}
                   unit="s"
                   onChange={setSpeakSeconds}
                   accent={accent}
@@ -1151,7 +1183,7 @@ function GhostLink({ children, href, download }) {
   );
 }
 
-function RecordingsLibrary({ recordings, onDelete, accent }) {
+function RecordingsLibrary({ recordings, onDelete, onUpdate, accent }) {
   if (recordings.length === 0) {
     return (
       <div
@@ -1173,67 +1205,156 @@ function RecordingsLibrary({ recordings, onDelete, accent }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <div style={{ fontSize: 12, color: C.textMuted, textAlign: "center", marginBottom: 4 }}>
-        Saved for this browser tab only — download anything you want to keep before you reload or close the page.
+        Saved on this device — persists across reloads. Download anything you want to keep elsewhere.
       </div>
       {recordings.map((rec) => (
-        <div
-          key={rec.id}
-          style={{
-            background: C.surface,
-            border: `1px solid ${C.border}`,
-            borderRadius: 16,
-            padding: "18px 20px",
-            boxShadow: "0 8px 24px rgba(0,0,0,0.22)",
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "baseline",
-              gap: 10,
-              marginBottom: 4,
-            }}
-          >
-            <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: accent }}>
-              {rec.cat}
-            </div>
-            <div style={{ fontSize: 12, color: C.textMuted, flexShrink: 0 }}>{formatTime(rec.seconds)}</div>
-          </div>
+        <RecordingItem key={rec.id} rec={rec} onDelete={onDelete} onUpdate={onUpdate} accent={accent} />
+      ))}
+    </div>
+  );
+}
+
+function RecordingItem({ rec, onDelete, onUpdate, accent }) {
+  const [editing, setEditing] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(rec.label || rec.topicText);
+  const [noteDraft, setNoteDraft] = useState(rec.note || "");
+
+  const startEdit = () => {
+    setTitleDraft(rec.label || rec.topicText);
+    setNoteDraft(rec.note || "");
+    setConfirmingDelete(false);
+    setEditing(true);
+  };
+
+  const saveEdit = () => {
+    const trimmedTitle = titleDraft.trim();
+    onUpdate(rec.id, {
+      label: trimmedTitle && trimmedTitle !== rec.topicText ? trimmedTitle : null,
+      note: noteDraft.trim() || null,
+    });
+    setEditing(false);
+  };
+
+  const inputStyle = {
+    width: "100%",
+    boxSizing: "border-box",
+    padding: "8px 10px",
+    borderRadius: 8,
+    border: `1px solid ${C.border}`,
+    background: C.surfaceAlt,
+    color: C.text,
+    fontFamily: "'Inter', sans-serif",
+    fontSize: 13,
+  };
+
+  const btnStyle = (color) => ({
+    padding: "8px 16px",
+    borderRadius: 10,
+    border: `1px solid ${C.border}`,
+    cursor: "pointer",
+    background: "transparent",
+    color: color || C.text,
+    fontFamily: "'Inter', sans-serif",
+    fontWeight: 600,
+    fontSize: 13,
+  });
+
+  return (
+    <div
+      style={{
+        background: C.surface,
+        border: `1px solid ${C.border}`,
+        borderRadius: 16,
+        padding: "18px 20px",
+        boxShadow: "0 8px 24px rgba(0,0,0,0.22)",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "baseline",
+          gap: 10,
+          marginBottom: 4,
+        }}
+      >
+        <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: accent }}>
+          {rec.cat}
+        </div>
+        <div style={{ fontSize: 12, color: C.textMuted, flexShrink: 0 }}>
+          {formatDate(rec.createdAt)} · {formatTime(rec.seconds)}
+        </div>
+      </div>
+
+      {editing ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
+          <input
+            style={inputStyle}
+            value={titleDraft}
+            onChange={(e) => setTitleDraft(e.target.value)}
+            placeholder="Title"
+            maxLength={120}
+          />
+          <input
+            style={inputStyle}
+            value={noteDraft}
+            onChange={(e) => setNoteDraft(e.target.value)}
+            placeholder="Add a short note (optional)"
+            maxLength={200}
+          />
+        </div>
+      ) : (
+        <div style={{ marginBottom: 12 }}>
           <div
             style={{
               fontFamily: "'Fraunces', serif",
               fontWeight: 600,
               fontSize: 16,
-              marginBottom: 12,
             }}
           >
-            {rec.topicText}
+            {rec.label || rec.topicText}
           </div>
-          <audio controls src={rec.url} style={{ width: "100%", marginBottom: 12 }} />
-          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-            <GhostLink href={rec.url} download={recordingFilename({ text: rec.topicText })}>
-              Save
-            </GhostLink>
-            <button
-              onClick={() => onDelete(rec.id)}
-              style={{
-                padding: "8px 16px",
-                borderRadius: 10,
-                border: `1px solid ${C.border}`,
-                cursor: "pointer",
-                background: "transparent",
-                color: C.red,
-                fontFamily: "'Inter', sans-serif",
-                fontWeight: 600,
-                fontSize: 13,
-              }}
-            >
-              Delete
-            </button>
-          </div>
+          {rec.note ? (
+            <div style={{ fontSize: 13, color: C.textMuted, marginTop: 4 }}>{rec.note}</div>
+          ) : null}
         </div>
-      ))}
+      )}
+
+      <audio controls src={rec.url} style={{ width: "100%", marginBottom: 12 }} />
+
+      {editing ? (
+        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+          <button onClick={() => setEditing(false)} style={btnStyle()}>
+            Cancel
+          </button>
+          <button onClick={saveEdit} style={btnStyle(C.sage)}>
+            Save
+          </button>
+        </div>
+      ) : confirmingDelete ? (
+        <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "flex-end" }}>
+          <span style={{ fontSize: 13, color: C.textMuted }}>Delete this recording?</span>
+          <button onClick={() => setConfirmingDelete(false)} style={btnStyle()}>
+            Cancel
+          </button>
+          <button onClick={() => onDelete(rec.id)} style={btnStyle(C.red)}>
+            Confirm Delete
+          </button>
+        </div>
+      ) : (
+        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+          <GhostLink href={rec.url} download={recordingFilename({ text: rec.label || rec.topicText })}>
+            Save
+          </GhostLink>
+          <button onClick={startEdit} style={btnStyle()}>
+            Edit
+          </button>
+          <button onClick={() => setConfirmingDelete(true)} style={btnStyle(C.red)}>
+            Delete
+          </button>
+        </div>
+      )}
     </div>
   );
 }
